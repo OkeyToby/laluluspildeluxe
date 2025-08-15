@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plumber Quest — et Mario-agtigt platformspil</title>
+<meta name="description" content="Et lille side-scrolling platformspil i én HTML-fil: løb, hop, saml mønter, tramp på fjender og ram flaget.">
+<style>
+  :root{ --bg:#0b0d12; --sky:#89c4ff; --hud:#0d1320; --tile:#2b3345; --coin:#ffd75a; --flag:#9cffb3; --player:#ffd1fa; --enemy:#ff7a8a; }
+  html,body{height:100%;margin:0;background:var(--bg);color:#e9eef7;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  .top{position:fixed;inset:0 0 auto 0;padding:8px 12px;background:linear-gradient(180deg,rgba(13,19,32,.9),rgba(13,19,32,0));display:flex;gap:12px;align-items:center;z-index:3}
+  .top .pill{background:#121b2e;border:1px solid #22304d;border-radius:999px;padding:6px 10px;font-size:14px}
+  .wrap{display:flex;align-items:center;justify-content:center;padding-top:46px}
+  canvas{display:block;image-rendering:pixelated;background:var(--sky);border-bottom:3px solid #6fb2ff}
+  .hint{position:fixed;left:50%;transform:translateX(-50%);bottom:10px;background:#0e1627cc;border:1px solid #22304d;padding:6px 10px;border-radius:8px;font-size:12px}
+  .mobile{position:fixed;right:10px;bottom:10px;display:none;gap:8px;z-index:3}
+  .btn{background:#15203a;border:1px solid #22304d;color:#e9eef7;border-radius:10px;padding:10px 12px;min-width:44px;min-height:44px}
+  @media (pointer:none), (pointer:coarse){ .mobile{display:flex} .hint{display:none} }
+</style>
+</head>
+<body>
+<div class="top">
+  <div class="pill" id="hudScore">Mønter: 0</div>
+  <div class="pill" id="hudLives">Liv: 3</div>
+  <div class="pill" id="hudLevel">Level: 1</div>
+  <div class="pill" id="hudMsg"></div>
+  <button class="btn" id="btnMute" style="margin-left:auto">🔊</button>
+</div>
+<div class="wrap">
+  <canvas id="game" width="960" height="540"></canvas>
+</div>
+<div class="hint">Styring: A/D eller ◀▶ = løb · W/␣ eller ▲ = hop · R = restart</div>
+<div class="mobile">
+  <button class="btn" id="mLeft">◀</button>
+  <button class="btn" id="mRight">▶</button>
+  <button class="btn" id="mJump">⤒</button>
+</div>
+<script>
+// Config
+const TILE=32, GRAV=0.6, JUMP=11, MAX_FALL=18, RUN=0.6, FRICTION=0.8;
+const canvas=document.getElementById('game'), ctx=canvas.getContext('2d');
+const viewW=canvas.width, viewH=canvas.height;
+
+// Audio
+let audioCtx=null, muted=false;
+function ainit(){ if(!audioCtx){ const AC=window.AudioContext||window.webkitAudioContext; audioCtx=new AC(); }}
+function beep(freq, dur=0.1, type='square', vol=0.03){
+  if(muted||!audioCtx) return; const t=audioCtx.currentTime;
+  const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+  o.type=type; o.frequency.setValueAtTime(freq, t);
+  g.gain.value=vol; g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+  o.connect(g).connect(audioCtx.destination); o.start(t); o.stop(t+dur);
+}
+document.getElementById('btnMute').onclick=()=>{ ainit(); muted=!muted; document.getElementById('btnMute').textContent=muted?'🔇':'🔊'; };
+// Levels
+const LEVELS=[`..........................................................................................................................
+..........................................................................................................................
+..........................................................................................................................
+......................................................C.................................................................F.
+.....................C................................#.........................................................#######..##
+....................###....................C......................................................C.............#.....#....
+...............C.....................................###..........................C..............###............#.....#....
+..............###.......................#######.................................####............................#.....#....
+P............................................................C..................................................#.....#....
+#########################......####..................##############.......###############.............#######...#.....#....
+..........................#........#.................................................................##.....#####.....#....
+..........................#........#..................................................C.............#.....................
+..........................#........#.......C.................E.......................###............#.....................
+..........................#........#......###.............######....................................#.....................
+..........................#........#.................................................................#.....................
+..........................##########.................................................................######################`,
+`..........................................................................................................................
+..........................................................................................................................
+..........................................................................................................................
+.............................................................C..........................................................F.
+.....................C........................................#..................................................##########
+....................###.................C..................................................C.....................#.........
+...............C............................................###...........................###....................#.........
+..............###.......................#######.................................................................#.........
+P.................................................................C............................................#.........
+#########################......####..................##############.......###############.............#######....#.........
+..........................#........#.................................................................##.....#####.........#
+..........................#........#.................................................................#.....................
+..........................#........#.......C.................E......................................#.....................
+..........................#........#......###.............######....................................#.....................
+..........................#........#.................................................................#.....................
+..........................##########.................................................................######################`];
+// Tile helpers and state
+function tileAt(x,y){ const tx=Math.floor(x/TILE), ty=Math.floor(y/TILE); if(ty<0||ty>=level.h||tx<0||tx>=level.w) return '#'; return level.grid[ty][tx]; }
+function setTile(tx,ty,ch){ if(ty>=0&&ty<level.h&&tx>=0&&tx<level.w){ const row=level.grid[ty].split(''); row[tx]=ch; level.grid[ty]=row.join(''); } }
+let cur=0, level, player, enemies, coins, cameraX=0, lives=3, score=0, win=false;
+function loadLevel(idx){
+  const lines = LEVELS[idx].split('\n').map(s=>s.replace(/\r/g,''));
+  const h=lines.length, w=Math.max(...lines.map(s=>s.length));
+  for(let i=0;i<lines.length;i++){ if(lines[i].length<w) lines[i]=lines[i]+'.'.repeat(w-lines[i].length); }
+  level={w,h,grid:lines}; enemies=[]; coins=[]; win=false;
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const ch=level.grid[y][x];
+    if(ch==='P'){ player={x:x*TILE,y:y*TILE,vx:0,vy:0,onGround:false}; setTile(x,y,'.'); }
+    if(ch==='E'){ enemies.push({x:x*TILE,y:y*TILE,vx:-1.2,vy:0,onGround:false,alive:true}); setTile(x,y,'.'); }
+    if(ch==='C'){ coins.push({x:x*TILE+TILE/2,y:y*TILE+TILE/2,taken:false}); setTile(x,y,'.'); }
+  }
+  updateHUD();
+}
+function updateHUD(){
+  hudScore.textContent=`Mønter: ${score}`;
+  hudLives.textContent=`Liv: ${lives}`;
+  hudLevel.textContent=`Level: ${cur+1}`;
+}
+function resetPlayer(){ const lines=LEVELS[cur].split('\n'); for(let y=0;y<lines.length;y++) for(let x=0;x<lines[y].length;x++){ if(lines[y][x]==='P'){ player.x=x*TILE; player.y=y*TILE; player.vx=0; player.vy=0; return; } } }
+// Input
+const keys={};
+addEventListener('keydown',e=>{ keys[e.key]=true; if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault(); ainit(); });
+addEventListener('keyup',e=>{ keys[e.key]=false; });
+const mLeft=document.getElementById('mLeft'), mRight=document.getElementById('mRight'), mJump=document.getElementById('mJump');
+mLeft.onpointerdown=()=>{keys['ArrowLeft']=true; ainit();}; mLeft.onpointerup=()=>{keys['ArrowLeft']=false; };
+mRight.onpointerdown=()=>{keys['ArrowRight']=true; ainit();}; mRight.onpointerup=()=>{keys['ArrowRight']=false; };
+mJump.onpointerdown=()=>{keys['jump']=true; ainit();}; mJump.onpointerup=()=>{keys['jump']=false; };
+// Physics
+function stepEntity(e){ e.x+=e.vx; if(collides(e)){ e.x-=e.vx; while(!collides(e)){ e.x+=Math.sign(e.vx)||0; if(collides(e)){ e.x-=Math.sign(e.vx)||0; break; } } e.vx=0; } e.vy=Math.max(Math.min(e.vy+GRAV,18),-18); e.y+=e.vy; e.onGround=false; if(collides(e)){ e.y-=e.vy; while(!collides(e)){ e.y+=Math.sign(e.vy)||0; if(collides(e)){ e.y-=Math.sign(e.vy)||0; break; } } if(e.vy>0) e.onGround=true; e.vy=0; } }
+function collides(e){ const w=TILE*0.8,h=TILE*0.95,ox=(TILE-w)/2,oy=TILE-h; const c=[[e.x+ox,e.y+oy],[e.x+ox+w,e.y+oy],[e.x+ox,e.y+oy+h],[e.x+ox+w,e.y+oy+h]]; return c.some(([x,y])=>tileAt(x,y)==='#'); }
+function killsPlayer(x,y){ return y>level.h*TILE+200; }
+// Update loop
+function update(){ if(!player) return; const left=keys['a']||keys['A']||keys['ArrowLeft']; const right=keys['d']||keys['D']||keys['ArrowRight']; const jumpKey=keys['w']||keys['W']||keys[' ']||keys['ArrowUp']||keys['jump']; if(left) player.vx=Math.max(player.vx-RUN,-6); if(right) player.vx=Math.min(player.vx+RUN,6); if(!left&&!right) player.vx*=FRICTION; if(jumpKey&&player.onGround){ player.vy=-JUMP; player.onGround=false; beep(880,0.08,'square',0.04); } stepEntity(player);
+  // coins
+  for(const c of coins){ if(c.taken) continue; const dx=(player.x+TILE/2)-c.x, dy=(player.y+TILE/2)-c.y; if(Math.hypot(dx,dy)<TILE*0.7){ c.taken=true; score++; updateHUD(); beep(1200,0.08,'sine',0.05); } }
+  // enemies
+  for(const en of enemies){ if(!en.alive) continue; en.vx += (en.vx<0?-0.05:0.05); en.vx = Math.max(Math.min(en.vx,1.5),-1.5); const aheadX=en.x+(en.vx<0?-TILE/2:TILE/2); const feetY=en.y+TILE/2+2; const groundAhead=tileAt(aheadX,feetY+TILE)==='#'; const wallAhead=tileAt(aheadX+Math.sign(en.vx)*TILE/2,feetY)==='#'; if(!groundAhead||wallAhead){ en.vx=-en.vx; } stepEntity(en); if(Math.abs((player.x+TILE/2)-(en.x+TILE/2))<TILE*0.6 && (player.y+TILE-6)<=en.y && (player.y+TILE)>=en.y){ if(player.vy>0){ en.alive=false; beep(200,0.05,'sawtooth',0.05); player.vy=-JUMP*0.6; } else { hurtPlayer(); } } }
+  if(tileAt(player.x+TILE/2,player.y+TILE/2)==='F' && !win){ win=true; beep(1000,0.2,'triangle',0.06); hudMsg.textContent='Level klar!'; setTimeout(()=>{ cur=(cur+1)%LEVELS.length; loadLevel(cur); resetPlayer(); hudMsg.textContent=''; },700); }
+  cameraX=Math.max(0, Math.min(player.x - viewW/2 + TILE, level.w*TILE - viewW)); if(killsPlayer(player.x,player.y)){ hurtPlayer(true); }
+  draw(); requestAnimationFrame(update); }
+function hurtPlayer(fall=false){ if(win) return; lives--; hudMsg.textContent = fall? 'Av! Faldt ned!' : 'Av!'; beep(120,0.2,'triangle',0.07); if(lives<0){ lives=3; score=0; cur=0; loadLevel(cur); } resetPlayer(); setTimeout(()=>hudMsg.textContent='',700); updateHUD(); }
+// Render
+function draw(){ ctx.clearRect(0,0,viewW,viewH); const g=ctx.createLinearGradient(0,0,0,viewH); g.addColorStop(0,'#87c8ff'); g.addColorStop(1,'#cfe9ff'); ctx.fillStyle=g; ctx.fillRect(0,0,viewW,viewH); drawParallax(); for(let y=0;y<level.h;y++){ for(let x=0;x<level.w;x++){ const ch=level.grid[y][x]; const sx=x*TILE - cameraX, sy=y*TILE; if(sx<-TILE||sx>viewW+TILE||sy<-TILE||sy>viewH+TILE) continue; if(ch==='#'){ ctx.fillStyle='#2b3345'; ctx.fillRect(sx,sy,TILE,TILE); ctx.fillStyle='#3a455f'; ctx.fillRect(sx+4,sy+4,TILE-8,TILE-8); } if(ch==='?'){ ctx.fillStyle='#9ad1ff'; ctx.fillRect(sx+6,sy+6,TILE-12,TILE-12); } if(ch==='F'){ ctx.fillStyle='#9cffb3'; ctx.fillRect(sx+TILE-10, sy-32, 3, 32); ctx.fillStyle='#8af'; ctx.beginPath(); ctx.moveTo(sx+TILE-7,sy-28); ctx.lineTo(sx+TILE+12,sy-20); ctx.lineTo(sx+TILE-7,sy-12); ctx.fill(); } } } for(const c of coins){ if(c.taken) continue; const sx=c.x-cameraX, sy=c.y; drawCoin(sx,sy); } for(const e of enemies){ if(!e.alive) continue; const sx=e.x-cameraX, sy=e.y; drawEnemy(sx,sy); } drawPlayer(player.x-cameraX, player.y); }
+function drawParallax(){ ctx.fillStyle='rgba(255,255,255,0.25)'; for(let i=0;i<8;i++){ const y=300+20*Math.sin((i*200 - cameraX)*0.001); ctx.fillRect((i*300 - (cameraX*0.3))%1200 - 100, y, 140, 12); } }
+function drawCoin(x,y){ ctx.save(); ctx.translate(x,y); ctx.beginPath(); ctx.arc(0,0,10,0,Math.PI*2); ctx.fillStyle='#ffd75a'; ctx.fill(); ctx.fillStyle='#ffefaa'; ctx.fillRect(-3,-8,6,16); ctx.restore(); }
+function drawEnemy(x,y){ ctx.save(); ctx.translate(x,y); ctx.fillStyle='#ff7a8a'; ctx.fillRect(4,8,24,24); ctx.fillStyle='#fff'; ctx.fillRect(8,12,6,6); ctx.fillRect(20,12,6,6); ctx.fillStyle='#222'; ctx.fillRect(10,14,2,2); ctx.fillRect(22,14,2,2); ctx.restore(); }
+function drawPlayer(x,y){ ctx.save(); ctx.translate(x,y); ctx.fillStyle='#ffd1fa'; ctx.fillRect(6,4,20,12); ctx.fillStyle='#fdf'; ctx.fillRect(4,16,24,20); ctx.fillStyle='#fff'; ctx.fillRect(8,20,6,6); ctx.fillRect(20,20,6,6); ctx.fillStyle='#222'; ctx.fillRect(10,22,2,2); ctx.fillRect(22,22,2,2); ctx.restore(); }
+// Start
+loadLevel(cur); resetPlayer(); update();
+addEventListener('keydown',e=>{ if(e.key==='r'||e.key==='R'){ loadLevel(cur); resetPlayer(); }});
+</script>
+</body>
+</html>
